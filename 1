@@ -1,0 +1,556 @@
+-- ========================================================
+-- GREEDY GROWERS - V14.1 FIX / UPGRADE
+-- Giữ nguyên tính năng V14
+-- Chỉ sửa Harvest + Fly + respawn + debounce
+-- ========================================================
+
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Window = Rayfield:CreateWindow({
+    Name = "⚡ Greedy Growers - Final Pro",
+    LoadingTitle = "Đang khởi động hệ thống chuẩn...",
+    LoadingSubtitle = "By Gemini",
+    ConfigurationSaving = { Enabled = false },
+    KeySystem = false
+})
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ========================================================
+-- STATE
+-- ========================================================
+
+local autoBuyEnabled = false
+local autoPlantEnabled = false
+local autoHarvestStorm = false
+
+local currentSelectedSeed = "Nhập tên seed..."
+
+local infJumpEnabled = false
+local flyEnabled = false
+
+local currentWalkSpeed = 16
+local currentJumpPower = 50
+
+local harvestDistance = 50
+local harvestCooldown = 1.25
+
+local lastHarvest = {}
+local stormWasActive = false
+
+-- ========================================================
+-- HELPER
+-- ========================================================
+
+local function getCharacter()
+    local character = LocalPlayer.Character
+
+    if not character then
+        return nil, nil, nil
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+
+    return character, humanoid, hrp
+end
+
+local function notify(title, content, duration)
+    Rayfield:Notify({
+        Title = title,
+        Content = content,
+        Duration = duration or 2
+    })
+end
+
+local function lower(v)
+    return tostring(v or ""):lower()
+end
+
+-- ========================================================
+-- TAB 1: TRANG TRẠI
+-- ========================================================
+
+local FarmTab = Window:CreateTab("🌱 Trang Trại", 4483362458)
+
+FarmTab:CreateInput({
+    Name = "🎯 Nhập chính xác tên Seed (Mua / Trồng)",
+    PlaceholderText = "Ví dụ: Carrot, Tomato...",
+    RemoveTextAfterFocusLost = false,
+
+    Callback = function(text)
+        text = tostring(text or "")
+
+        if text ~= "" then
+            currentSelectedSeed = text
+
+            notify(
+                "Đã cập nhật Seed",
+                "Đang chọn: " .. text,
+                2
+            )
+        end
+    end,
+})
+
+FarmTab:CreateToggle({
+    Name = "🛒 Auto Mua Hạt Giống Đã Nhập",
+    CurrentValue = false,
+
+    Callback = function(v)
+        autoBuyEnabled = v
+    end,
+})
+
+FarmTab:CreateToggle({
+    Name = "🪴 Auto Trồng Hạt Giống Đã Nhập",
+    CurrentValue = false,
+
+    Callback = function(v)
+        autoPlantEnabled = v
+    end,
+})
+
+FarmTab:CreateToggle({
+    Name = "⚡ Chỉ Thu Hoạch Khi Có Sét Đánh (Không hái non)",
+    CurrentValue = false,
+
+    Callback = function(v)
+        autoHarvestStorm = v
+
+        notify({
+            Title = "Chống Sét",
+            Content = v
+                and "Đang canh sấm sét chuẩn xác!"
+                or "Đã tắt",
+            Duration = 2
+        })
+    end,
+})
+
+-- ========================================================
+-- TAB 2: BẢN THÂN
+-- ========================================================
+
+local PlayerTab = Window:CreateTab("👤 Bản thân", 4483362458)
+
+PlayerTab:CreateSlider({
+    Name = "🏃 Tốc độ (WalkSpeed)",
+    Range = {16, 250},
+    Increment = 1,
+    CurrentValue = 16,
+
+    Callback = function(v)
+        currentWalkSpeed = v
+
+        local _, humanoid = getCharacter()
+
+        if humanoid then
+            humanoid.WalkSpeed = v
+        end
+    end,
+})
+
+PlayerTab:CreateSlider({
+    Name = "🚀 Nhảy cao (JumpPower)",
+    Range = {50, 400},
+    Increment = 1,
+    CurrentValue = 50,
+
+    Callback = function(v)
+        currentJumpPower = v
+
+        local _, humanoid = getCharacter()
+
+        if humanoid then
+            humanoid.UseJumpPower = true
+            humanoid.JumpPower = v
+        end
+    end,
+})
+
+PlayerTab:CreateSlider({
+    Name = "🌍 Trọng lực (Gravity)",
+    Range = {0, 196.2},
+    Increment = 5,
+    CurrentValue = 196.2,
+
+    Callback = function(v)
+        Workspace.Gravity = v
+    end,
+})
+
+PlayerTab:CreateToggle({
+    Name = "♾️ Nhảy vô hạn (Infinite Jump)",
+    CurrentValue = false,
+
+    Callback = function(v)
+        infJumpEnabled = v
+    end,
+})
+
+-- ========================================================
+-- FLY - GIỮ NGUYÊN TÍNH NĂNG
+-- ========================================================
+
+local flyVelocity = nil
+local flyConnection = nil
+
+local function stopFly()
+    flyEnabled = false
+
+    if flyConnection then
+        flyConnection:Disconnect()
+        flyConnection = nil
+    end
+
+    if flyVelocity then
+        flyVelocity:Destroy()
+        flyVelocity = nil
+    end
+end
+
+local function startFly()
+    stopFly()
+
+    local character, humanoid, hrp = getCharacter()
+
+    if not character or not humanoid or not hrp then
+        return
+    end
+
+    flyEnabled = true
+
+    flyVelocity = Instance.new("BodyVelocity")
+    flyVelocity.Name = "FlyVelocity"
+    flyVelocity.MaxForce = Vector3.new(
+        math.huge,
+        math.huge,
+        math.huge
+    )
+    flyVelocity.Velocity = Vector3.zero
+    flyVelocity.Parent = hrp
+
+    flyConnection = RunService.RenderStepped:Connect(function()
+        if not flyEnabled then
+            return
+        end
+
+        if not hrp.Parent then
+            stopFly()
+            return
+        end
+
+        local camera = Workspace.CurrentCamera
+
+        if not camera then
+            return
+        end
+
+        local direction = Vector3.zero
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+            direction += camera.CFrame.LookVector
+        end
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+            direction -= camera.CFrame.LookVector
+        end
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+            direction -= camera.CFrame.RightVector
+        end
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+            direction += camera.CFrame.RightVector
+        end
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            direction += Vector3.new(0, 1, 0)
+        end
+
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+            direction -= Vector3.new(0, 1, 0)
+        end
+
+        if direction.Magnitude > 0 then
+            direction = direction.Unit * 50
+        end
+
+        flyVelocity.Velocity = direction
+    end)
+end
+
+PlayerTab:CreateToggle({
+    Name = "🕊️ Bay (Fly)",
+    CurrentValue = false,
+
+    Callback = function(v)
+        if v then
+            startFly()
+        else
+            stopFly()
+        end
+    end,
+})
+
+-- ========================================================
+-- INFINITE JUMP
+-- ========================================================
+
+UserInputService.JumpRequest:Connect(function()
+    if not infJumpEnabled then
+        return
+    end
+
+    local _, humanoid = getCharacter()
+
+    if humanoid then
+        humanoid:ChangeState(
+            Enum.HumanoidStateType.Jumping
+        )
+    end
+end)
+
+-- ========================================================
+-- CHARACTER RESPAWN
+-- Giữ lại Speed / Jump / Fly sau khi chết
+-- ========================================================
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+
+    task.wait(0.5)
+
+    local humanoid =
+        character:FindFirstChildOfClass("Humanoid")
+
+    if humanoid then
+        humanoid.WalkSpeed = currentWalkSpeed
+        humanoid.UseJumpPower = true
+        humanoid.JumpPower = currentJumpPower
+    end
+
+    if flyEnabled then
+        task.wait(0.25)
+        startFly()
+    end
+end)
+
+-- ========================================================
+-- TÌM TRẠNG THÁI CÂY
+-- ========================================================
+
+local matureAttributes = {
+    "Mature",
+    "Matured",
+    "IsMature",
+    "FullyGrown",
+    "FullyGrown",
+    "Ready",
+    "Harvestable",
+    "CanHarvest",
+    "Grown"
+}
+
+local function findMatureState(obj)
+
+    local current = obj
+
+    for _ = 1, 6 do
+
+        if not current then
+            break
+        end
+
+        for _, attributeName in ipairs(matureAttributes) do
+
+            local value =
+                current:GetAttribute(attributeName)
+
+            if value ~= nil then
+
+                if typeof(value) == "boolean" then
+                    return value
+                end
+
+                if typeof(value) == "number" then
+                    return value > 0
+                end
+
+                if typeof(value) == "string" then
+
+                    local v =
+                        lower(value)
+
+                    if v == "true"
+                        or v == "ready"
+                        or v == "mature"
+                        or v == "matured"
+                        or v == "grown"
+                        or v == "harvestable" then
+
+                        return true
+                    end
+
+                    if v == "false"
+                        or v == "growing"
+                        or v == "immature"
+                        or v == "notready" then
+
+                        return false
+                    end
+                end
+            end
+        end
+
+        for _, name in ipairs(matureAttributes) do
+
+            local valueObject =
+                current:FindFirstChild(name)
+
+            if valueObject then
+
+                if valueObject:IsA("BoolValue") then
+                    return valueObject.Value
+                end
+
+                if valueObject:IsA("NumberValue") then
+                    return valueObject.Value > 0
+                end
+
+                if valueObject:IsA("StringValue") then
+
+                    local v =
+                        lower(valueObject.Value)
+
+                    if v == "true"
+                        or v == "ready"
+                        or v == "mature"
+                        or v == "grown" then
+
+                        return true
+                    end
+
+                    if v == "false"
+                        or v == "growing"
+                        or v == "immature" then
+
+                        return false
+                    end
+                end
+            end
+        end
+
+        current = current.Parent
+    end
+
+    return nil
+end
+
+-- ========================================================
+-- NHẬN DIỆN PROMPT HARVEST
+-- ========================================================
+
+local function isHarvestPrompt(prompt)
+
+    if not prompt:IsA("ProximityPrompt") then
+        return false
+    end
+
+    if not prompt.Enabled then
+        return false
+    end
+
+    local parent = prompt.Parent
+
+    if not parent then
+        return false
+    end
+
+    local promptName =
+        lower(prompt.Name)
+
+    local actionText =
+        lower(prompt.ActionText)
+
+    local objectText =
+        lower(prompt.ObjectText)
+
+    local parentName =
+        lower(parent.Name)
+
+    local grandParentName = ""
+
+    if parent.Parent then
+        grandParentName =
+            lower(parent.Parent.Name)
+    end
+
+    local combined =
+        promptName .. " " ..
+        actionText .. " " ..
+        objectText .. " " ..
+        parentName .. " " ..
+        grandParentName
+
+    local keywords = {
+        "harvest",
+        "crop",
+        "plant",
+        "fruit",
+        "vegetable",
+        "farm",
+        "produce",
+        "collect"
+    }
+
+    local matched = false
+
+    for _, keyword in ipairs(keywords) do
+
+        if combined:find(keyword, 1, true) then
+            matched = true
+            break
+        end
+    end
+
+    if not matched then
+        return false
+    end
+
+    -- Nếu game cung cấp trạng thái trưởng thành
+    -- thì bắt buộc phải trưởng thành.
+    local mature =
+        findMatureState(parent)
+
+    if mature ~= nil then
+        return mature
+    end
+
+    -- Nếu ActionText đã trực tiếp là Harvest/Collect
+    -- thì cho phép prompt.
+    if actionText:find("harvest", 1, true)
+        or actionText:find("collect", 1, true)
+        or actionText:find("pickup", 1, true) then
+
+        return true
+    end
+
+    return false
+end
+
+-- ========================================================
+-- HARVEST
+-- ========================================================
+
+local function harvestMatureCrops()
+
+    local character, humanoid, hrp =
+        getCharacter()
+
+   
